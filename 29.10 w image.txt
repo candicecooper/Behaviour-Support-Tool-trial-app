@@ -1,0 +1,1005 @@
+import streamlit as st
+import pandas as pd
+from datetime import datetime, time, timedelta
+import random
+import uuid
+import plotly.express as px
+import numpy as np
+import base64 # Required for download button
+
+# --- Configuration and Aesthetics (High-Contrast Dark Look) ---
+
+st.set_page_config(
+    page_title="Behaviour Support & Data Analysis Tool",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+# Define Plotly Theme for Dark Mode Consistency
+PLOTLY_THEME = 'plotly_dark'
+
+# --- FBA and Data Constants ---
+
+MOCK_STAFF = [
+    {'id': 's1', 'name': 'Emily Jones (JP)', 'role': 'JP', 'active': True, 'special': False},
+    {'id': 's2', 'name': 'Daniel Lee (PY)', 'role': 'PY', 'active': True, 'special': False},
+    {'id': 's3', 'name': 'Sarah Chen (SY)', 'role': 'SY', 'active': True, 'special': False},
+    {'id': 's4', 'name': 'Admin User (ADM)', 'role': 'ADM', 'active': True, 'special': False},
+    # Special roles that require manual name input
+    {'id': 's_trt', 'name': 'TRT', 'role': 'TRT', 'active': True, 'special': True},
+    {'id': 's_sso', 'name': 'External SSO', 'role': 'SSO', 'active': True, 'special': True},
+]
+
+MOCK_STUDENTS = [
+    {'id': 'st_jp_01', 'name': 'Chloe L.', 'class': '1A', 'area': 'JP'},
+    {'id': 'st_jp_02', 'name': 'Oliver T.', 'class': '2B', 'area': 'JP'},
+    {'id': 'st_jp_03', 'name': 'Isabelle R.', 'class': 'R1', 'area': 'JP'},
+    {'id': 'st_py_01', 'name': 'Noah P.', 'class': '4C', 'area': 'PY'},
+    {'id': 'st_py_02', 'name': 'Amelia J.', 'class': '5D', 'area': 'PY'},
+    {'id': 'st_sy_01', 'name': 'Liam W.', 'class': 'Yr 9', 'area': 'SY'},
+    {'id': 'st_sy_02', 'name': 'Mia K.', 'class': 'Yr 11', 'area': 'SY'},
+    {'id': 'st_sy_03', 'name': 'Ethan B.', 'class': 'Yr 8', 'area': 'SY'},
+]
+
+INCIDENT_CATEGORIES = [
+    "Verbal Aggression", "Physical Aggression", "Property Damage",
+    "Non-Compliance", "Self-Injurious", "Out of Area", "Disruption",
+    "Minor Conflict", "Technology Misuse", "Other"
+]
+
+LOCATIONS = [
+    "Classroom", "Playground", "Oval/Field", "Canteen", "Library",
+    "Hallway", "Toilets", "Office Area", "Specialist Room", "Outside School"
+]
+
+FUNCTION_CATEGORIES = [
+    "Attention (Peer/Adult)", "Tangible (Object/Activity)",
+    "Escape/Avoidance (Task/Demand)", "Sensory (Automatic/Internal)"
+]
+
+STRATEGIES_CATEGORIES = {
+    "Preventative": [
+        "Pre-correction/Prompt", "Visual Schedule/Support",
+        "Clear Expectations/Rules", "Fidget/Sensory Tool", "Choice/Control"
+    ],
+    "Response": [
+        "Redirection/Prompt", "Planned Ignoring", "Proximity Control",
+        "Calming Strategy (e.g., breathing)", "Time Out/Relocation",
+        "Restitution/Repair", "Loss of Privilege"
+    ]
+}
+
+# --- Session State Initialization (Fix for AttributeError) ---
+
+def initialize_session_state():
+    """Ensures all critical session state variables are initialized."""
+    
+    # Initialize navigation state
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = 'landing'
+    if 'selected_role' not in st.session_state:
+        st.session_state.selected_role = None
+    if 'selected_student_id' not in st.session_state:
+        st.session_state.selected_student_id = None
+    if 'temp_log_area' not in st.session_state:
+        st.session_state.temp_log_area = None
+    
+    # Static data (Mock database)
+    if 'staff' not in st.session_state:
+        st.session_state.staff = MOCK_STAFF
+    if 'students' not in st.session_state:
+        st.session_state.students = MOCK_STUDENTS
+
+    # Initialize incidents_df if it doesn't exist
+    if 'incidents_df' not in st.session_state:
+        # Define the structure for the DataFrame with all expected columns
+        st.session_state.incidents_df = pd.DataFrame(
+            columns=[
+                'incident_id', 'date', 'time', 'datetime', 'student_id', 'student_name', 
+                'staff_id', 'staff_name', 'staff_role', 'area', 'category', 
+                'location', 'intensity', 'duration', 'antecedent', 'description', 
+                'function', 'preventative_strategies', 'response_strategies'
+            ]
+        )
+    
+    # Initialise filters for the Data Analysis page
+    if 'data_filters' not in st.session_state:
+        st.session_state.data_filters = {
+            'student_id': 'All',
+            'date_range': (datetime.today() - timedelta(days=30), datetime.today()),
+            'location': 'All',
+            'category': 'All',
+            'staff_id': 'All'
+        }
+
+# Run initialization at the very start of the app
+initialize_session_state()
+
+# --- Utility Functions ---
+
+def navigate_to(page, role=None, student_id=None):
+    """Handles page navigation and state updates."""
+    st.session_state.current_page = page
+    if role:
+        st.session_state.selected_role = role
+    if student_id:
+        st.session_state.selected_student_id = student_id
+    st.rerun()
+
+def get_student_by_id(student_id):
+    """Retrieves student details by ID."""
+    for student in st.session_state.students:
+        if student['id'] == student_id:
+            return student
+    return None
+
+def get_staff_by_id(staff_id):
+    """Retrieves staff details by ID."""
+    for staff in st.session_state.staff:
+        if staff['id'] == staff_id:
+            return staff
+    return None
+
+def save_incident(incident_data):
+    """Appends a new incident to the dataframe and resets state."""
+    
+    # 1. Prepare Incident ID
+    incident_data['incident_id'] = str(uuid.uuid4())
+    
+    # 2. Convert to DataFrame and Concatenate
+    new_incident_df = pd.DataFrame([incident_data])
+    st.session_state.incidents_df = pd.concat([st.session_state.incidents_df, new_incident_df], ignore_index=True)
+    
+    # 3. Reset form/navigation state
+    st.session_state.selected_student_id = None
+    st.session_state.temp_log_area = None
+
+# --- Form Components ---
+
+def render_incident_log_form(student):
+    """Renders the core incident logging form for a selected student."""
+    
+    student_name = student['name']
+    
+    st.markdown(f"### Student: **{student_name}** ({student['class']}, {student['area']})")
+    
+    with st.form("incident_log_form", clear_on_submit=False):
+        
+        col_dt, col_t = st.columns(2)
+        with col_dt:
+            incident_date = st.date_input("Incident Date", datetime.today())
+        with col_t:
+            # Use a text input for time to allow simple entry, or time input
+            incident_time_input = st.text_input("Incident Time (e.g., 10:30)", datetime.now().strftime("%H:%M"))
+
+        # --- Staff Reporter ---
+        st.markdown("#### Staff Reporting Incident")
+        
+        staff_options = {s['name']: s['id'] for s in st.session_state.staff if not s['special']}
+        special_staff_options = {s['name']: s['id'] for s in st.session_state.staff if s['special']}
+        
+        staff_selection_type = st.radio(
+            "Who is logging the incident?", 
+            ["Select from List", "Other / Special Role"], 
+            key='staff_type_radio', 
+            horizontal=True
+        )
+
+        selected_staff_id = None
+        staff_name_display = ""
+        
+        if staff_selection_type == "Select from List":
+            staff_list = list(staff_options.keys())
+            selected_staff_name = st.selectbox("Staff Name", staff_list, key='staff_list_select')
+            selected_staff_id = staff_options.get(selected_staff_name)
+            staff_name_display = selected_staff_name
+            staff_role = get_staff_by_id(selected_staff_id)['role'] if selected_staff_id else None
+        else:
+            staff_name_display = st.text_input("Enter Staff Name/Role (e.g., Jane Smith, Relief Teacher)", key='staff_manual_name')
+            
+            # Use 'TRT' as a pseudo-ID for manual entry if applicable, otherwise use a temporary ID
+            special_role = st.selectbox("Select Special Role Type (Optional)", [''] + list(special_staff_options.keys()), key='special_role_select')
+            if special_role:
+                selected_staff_id = special_staff_options.get(special_role)
+                staff_role = get_staff_by_id(selected_staff_id)['role']
+            else:
+                selected_staff_id = "s_manual_" + str(uuid.uuid4())[:8] # Temporary ID
+                staff_role = 'Other'
+
+        # --- Incident Details ---
+        st.markdown("#### Incident Details")
+        
+        col_cat, col_loc = st.columns(2)
+        with col_cat:
+            category = st.selectbox("Incident Category (What happened?)", INCIDENT_CATEGORIES)
+        with col_loc:
+            location = st.selectbox("Location", LOCATIONS)
+            
+        col_int, col_dur = st.columns(2)
+        with col_int:
+            intensity = st.slider("Intensity (1=Minor, 5=Major)", 1, 5, 3)
+        with col_dur:
+            duration = st.slider("Duration (Minutes)", 0, 60, 5)
+
+        antecedent = st.text_area("Antecedent (What happened IMMEDIATELY before the incident?)", 
+                                   placeholder="e.g., Asked to transition to the next activity, peer commented on his work.")
+        description = st.text_area("Description of Incident (Just the facts)", 
+                                    placeholder="e.g., Student swore at the teacher, picked up a chair, and threw it towards the wall. No one was harmed.")
+
+        # --- Hypothesis and Strategies ---
+        st.markdown("#### Behaviour Hypothesis & Strategies")
+        
+        function = st.radio("Hypothesised Function of Behaviour (Why did it happen?)", 
+                             FUNCTION_CATEGORIES, 
+                             horizontal=True)
+        
+        st.markdown("##### Strategies Used:")
+        
+        col_prev, col_resp = st.columns(2)
+        
+        with col_prev:
+            preventative_strategies = st.multiselect(
+                "Preventative Strategies (Used before the incident started or planned)",
+                STRATEGIES_CATEGORIES['Preventative']
+            )
+        
+        with col_resp:
+            response_strategies = st.multiselect(
+                "Response Strategies (Used to manage the incident)",
+                STRATEGIES_CATEGORIES['Response']
+            )
+            
+        st.markdown("---")
+        
+        submitted = st.form_submit_button("Submit Incident Log", type="primary")
+
+        if submitted:
+            # Basic validation
+            if not selected_staff_id and not staff_name_display:
+                st.error("Please select or enter the staff reporter's name.")
+            else:
+                try:
+                    # Validate and parse time input
+                    incident_time = datetime.strptime(incident_time_input.strip(), "%H:%M").time()
+                except ValueError:
+                    st.error("Invalid time format. Please use HH:MM (e.g., 10:30).")
+                    return # Stop submission on error
+                
+                # Combine date and time into a single datetime object (optional, but good for sorting)
+                incident_datetime = datetime.combine(incident_date, incident_time)
+
+                incident_data = {
+                    'date': incident_date.strftime('%Y-%m-%d'),
+                    'time': incident_time.strftime('%H:%M'),
+                    'datetime': incident_datetime,
+                    'student_id': student['id'],
+                    'student_name': student_name,
+                    'staff_id': selected_staff_id,
+                    'staff_name': staff_name_display,
+                    'staff_role': staff_role,
+                    'area': student['area'],
+                    'category': category,
+                    'location': location,
+                    'intensity': intensity,
+                    'duration': duration,
+                    'antecedent': antecedent,
+                    'description': description,
+                    'function': function,
+                    'preventative_strategies': ", ".join(preventative_strategies),
+                    'response_strategies': ", ".join(response_strategies)
+                }
+                
+                save_incident(incident_data)
+                st.success(f"Incident for {student_name} logged successfully!")
+                
+                # After successful submission, navigate back to the appropriate place
+                if st.session_state.temp_log_area == 'direct':
+                    navigate_to('landing')
+                else:
+                    navigate_to('staff_area', role=st.session_state.selected_role)
+                st.rerun() # Ensure immediate refresh
+
+# --- Page Render Functions ---
+
+def render_staff_area():
+    """Renders the main area selection page for the selected role."""
+    role = st.session_state.selected_role
+    
+    col_title, col_back = st.columns([4, 1])
+    with col_title:
+        st.title(f"{role} Area Portal")
+    with col_back:
+        if st.button("⬅ Back to Home", key="back_to_landing"):
+            navigate_to('landing')
+    
+    st.markdown("---")
+    
+    # Filter students for the current role's area (unless Admin)
+    if role == 'ADM':
+        area_students = st.session_state.students
+        st.subheader("Select Student for Incident Log (All Areas)")
+    else:
+        area_students = [s for s in st.session_state.students if s['area'] == role]
+        st.subheader(f"Select Student for Incident Log ({role} Students)")
+
+    if not area_students:
+        st.info(f"No students registered for the {role} area.")
+        return
+
+    # Create a list of student names for selection
+    student_list = [f"{s['name']} ({s['class']})" for s in area_students]
+    student_id_map = {f"{s['name']} ({s['class']})": s['id'] for s in area_students}
+
+    # Selection component
+    selected_student_display = st.selectbox(
+        "Student Name (Class)", 
+        options=[''] + student_list,
+        index=0,
+        key='staff_area_student_select'
+    )
+    
+    if selected_student_display:
+        selected_student_id = student_id_map[selected_student_display]
+        student = get_student_by_id(selected_student_id)
+        
+        st.markdown(f"**Selected Student:** {student['name']} | **Class:** {student['class']}")
+        
+        col_log, col_view = st.columns(2)
+        
+        with col_log:
+            if st.button(f"Start Incident Log for {student['name']}", type="primary", use_container_width=True):
+                st.session_state.temp_log_area = 'staff_area' 
+                navigate_to('log_form', student_id=selected_student_id)
+
+        with col_view:
+            if st.button(f"View Data for {student['name']}", type="secondary", use_container_width=True):
+                # Set filter for this student before navigating to data page
+                st.session_state.data_filters['student_id'] = selected_student_id
+                navigate_to('data_analysis')
+
+    st.markdown("---")
+
+    # Access Data Analysis and Admin tools regardless of student selection
+    if role == 'ADM':
+        st.subheader("Admin and System Management")
+        
+        col_adm_1, col_adm_2 = st.columns(2)
+        with col_adm_1:
+            if st.button("Go to Comprehensive Data Analysis", use_container_width=True):
+                st.session_state.data_filters['student_id'] = 'All' # Reset student filter
+                navigate_to('data_analysis')
+        with col_adm_2:
+            if st.button("Manage Student/Staff Database (Mock)", use_container_width=True):
+                navigate_to('admin_db')
+    elif role in ['JP', 'PY', 'SY']:
+        if st.button("Go to Comprehensive Data Analysis", use_container_width=True):
+            st.session_state.data_filters['student_id'] = 'All' # Reset student filter
+            navigate_to('data_analysis')
+    
+
+def render_log_form():
+    """Renders the incident log form after selection from the staff area."""
+    student = get_student_by_id(st.session_state.selected_student_id)
+    role = st.session_state.selected_role
+    
+    if student:
+        col_title, col_back = st.columns([4, 1])
+        with col_title:
+            st.markdown(f"## New Incident Log ({role})")
+        with col_back:
+            if st.button("⬅ Back to Area Portal", key="back_to_staff_area_form"):
+                navigate_to('staff_area', role=role)
+        st.markdown("---")
+        
+        render_incident_log_form(student)
+    else:
+        st.error("No student selected.")
+        navigate_to('staff_area', role=role)
+
+def render_data_analysis():
+    """Renders the data analysis and visualisation page."""
+    
+    col_title, col_back = st.columns([4, 1])
+    with col_title:
+        st.title("Data Analysis and Visualisation")
+    with col_back:
+        if st.button("⬅ Back to Portal", key="back_to_portal_from_data"):
+            navigate_to('staff_area', role=st.session_state.selected_role)
+    
+    st.markdown("---")
+
+    df = st.session_state.incidents_df
+    
+    if df.empty:
+        st.info("No incident data has been logged yet. Please log an incident to view data.")
+        return
+
+    # --- Sidebar Filters (using st.session_state.data_filters) ---
+    st.sidebar.header("Filter Data")
+
+    # 1. Student Filter
+    student_options = ['All'] + sorted([s['name'] for s in st.session_state.students])
+    # Map back to ID for internal logic
+    student_id_map = {'All': 'All'}
+    student_id_map.update({s['name']: s['id'] for s in st.session_state.students})
+    
+    # Convert ID in state back to name for display, or use 'All'
+    default_student_name = 'All'
+    if st.session_state.data_filters['student_id'] != 'All':
+        default_student = get_student_by_id(st.session_state.data_filters['student_id'])
+        if default_student:
+            default_student_name = default_student['name']
+
+    selected_student_name = st.sidebar.selectbox(
+        "Student", 
+        options=student_options,
+        index=student_options.index(default_student_name) if default_student_name in student_options else 0
+    )
+    
+    st.session_state.data_filters['student_id'] = student_id_map[selected_student_name]
+
+    # 2. Date Range Filter
+    start_date, end_date = st.session_state.data_filters['date_range']
+    date_range = st.sidebar.date_input(
+        "Date Range",
+        value=(start_date, end_date),
+        max_value=datetime.today().date() # Ensure max value is a date object
+    )
+    if len(date_range) == 2:
+        # Convert date range elements to datetime.date objects for comparison
+        start_date_obj = date_range[0]
+        end_date_obj = date_range[1]
+        st.session_state.data_filters['date_range'] = (start_date_obj, end_date_obj)
+        start_date, end_date = start_date_obj, end_date_obj
+    
+    # 3. Location Filter
+    st.session_state.data_filters['location'] = st.sidebar.selectbox(
+        "Location", 
+        options=['All'] + LOCATIONS, 
+        index=LOCATIONS.index(st.session_state.data_filters['location']) + 1 if st.session_state.data_filters['location'] in LOCATIONS else 0
+    )
+
+    # 4. Category Filter
+    st.session_state.data_filters['category'] = st.sidebar.selectbox(
+        "Category", 
+        options=['All'] + INCIDENT_CATEGORIES,
+        index=INCIDENT_CATEGORIES.index(st.session_state.data_filters['category']) + 1 if st.session_state.data_filters['category'] in INCIDENT_CATEGORIES else 0
+    )
+
+    # 5. Staff Filter
+    staff_options_disp = ['All'] + sorted([s['name'] for s in st.session_state.staff])
+    staff_id_map = {'All': 'All'}
+    staff_id_map.update({s['name']: s['id'] for s in st.session_state.staff})
+    
+    # Convert ID in state back to name for display, or use 'All'
+    default_staff_name = 'All'
+    if st.session_state.data_filters['staff_id'] != 'All':
+        default_staff = get_staff_by_id(st.session_state.data_filters['staff_id'])
+        if default_staff:
+            default_staff_name = default_staff['name']
+
+    selected_staff_name = st.sidebar.selectbox(
+        "Reporting Staff", 
+        options=staff_options_disp,
+        index=staff_options_disp.index(default_staff_name) if default_staff_name in staff_options_disp else 0
+    )
+    st.session_state.data_filters['staff_id'] = staff_id_map[selected_staff_name]
+
+
+    # --- Apply Filters ---
+    
+    filtered_df = df.copy()
+    
+    # Student Filter
+    if st.session_state.data_filters['student_id'] != 'All':
+        filtered_df = filtered_df[filtered_df['student_id'] == st.session_state.data_filters['student_id']]
+
+    # Date Range Filter
+    # Ensure 'datetime' column is proper datetime objects
+    filtered_df['datetime'] = pd.to_datetime(filtered_df['datetime'])
+    
+    # Filter by date only (using .dt.date)
+    filtered_df = filtered_df[
+        (filtered_df['datetime'].dt.date >= start_date) & 
+        (filtered_df['datetime'].dt.date <= end_date)
+    ]
+
+    # Location Filter
+    if st.session_state.data_filters['location'] != 'All':
+        filtered_df = filtered_df[filtered_df['location'] == st.session_state.data_filters['location']]
+
+    # Category Filter
+    if st.session_state.data_filters['category'] != 'All':
+        filtered_df = filtered_df[filtered_df['category'] == st.session_state.data_filters['category']]
+        
+    # Staff Filter
+    if st.session_state.data_filters['staff_id'] != 'All':
+        filtered_df = filtered_df[filtered_df['staff_id'] == st.session_state.data_filters['staff_id']]
+
+    # --- Display Filtered Data & Analysis ---
+    
+    st.subheader(f"Data Overview (Total Incidents: {len(filtered_df)})")
+
+    if filtered_df.empty:
+        st.warning("No incidents match the current filters.")
+        return
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "Summary & FBA", 
+        "Location & Time", 
+        "Strategies & Staff", 
+        "Raw Data", 
+        "Export"
+    ])
+
+    with tab1:
+        st.markdown("### 📊 FBA-Focused Analysis")
+
+        col1, col2 = st.columns(2)
+
+        # 1. Category Count
+        with col1:
+            st.markdown("#### Incident Category Frequency")
+            category_counts = filtered_df['category'].value_counts().reset_index()
+            category_counts.columns = ['Category', 'Count']
+            fig_cat = px.bar(
+                category_counts, 
+                x='Category', 
+                y='Count', 
+                color='Category',
+                title="Top Incident Categories",
+                template=PLOTLY_THEME
+            )
+            st.plotly_chart(fig_cat, use_container_width=True)
+
+        # 2. Function Count (Hypothesis)
+        with col2:
+            st.markdown("#### Hypothesized Function Frequency")
+            function_counts = filtered_df['function'].value_counts().reset_index()
+            function_counts.columns = ['Function', 'Count']
+            fig_func = px.pie(
+                function_counts, 
+                names='Function', 
+                values='Count',
+                title="Hypothesized Functions",
+                template=PLOTLY_THEME
+            )
+            st.plotly_chart(fig_func, use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("### 📈 Intensity and Duration")
+
+        col_int_avg, col_dur_avg = st.columns(2)
+        
+        avg_intensity = filtered_df['intensity'].mean().round(2)
+        avg_duration = filtered_df['duration'].mean().round(2)
+        
+        with col_int_avg:
+            st.metric(label="Average Intensity (1-5)", value=avg_intensity)
+            
+            # Intensity distribution
+            fig_intensity = px.histogram(
+                filtered_df, 
+                x='intensity', 
+                title='Intensity Distribution',
+                template=PLOTLY_THEME,
+                nbins=5,
+                color_discrete_sequence=px.colors.qualitative.Plotly
+            )
+            st.plotly_chart(fig_intensity, use_container_width=True)
+
+        with col_dur_avg:
+            st.metric(label="Average Duration (Minutes)", value=avg_duration)
+            
+            # Duration distribution
+            fig_duration = px.histogram(
+                filtered_df, 
+                x='duration', 
+                title='Duration Distribution',
+                template=PLOTLY_THEME,
+                color_discrete_sequence=px.colors.qualitative.Safe
+            )
+            st.plotly_chart(fig_duration, use_container_width=True)
+
+
+    with tab2:
+        st.markdown("### 🗺️ Contextual Analysis: Location and Time")
+
+        col3, col4 = st.columns(2)
+
+        # 3. Location Count
+        with col3:
+            st.markdown("#### Incidents by Location")
+            location_counts = filtered_df['location'].value_counts().reset_index()
+            location_counts.columns = ['Location', 'Count']
+            fig_loc = px.bar(
+                location_counts, 
+                x='Location', 
+                y='Count', 
+                color='Location',
+                title="Incidents by Location",
+                template=PLOTLY_THEME
+            )
+            st.plotly_chart(fig_loc, use_container_width=True)
+
+        # 4. Time of Day (Hourly Buckets)
+        with col4:
+            st.markdown("#### Incidents by Time of Day")
+            # Convert 'time' string to datetime.time, then extract hour
+            # Note: The datetime column is used for date filtering, 'time' string is used for time-of-day stats
+            filtered_df['hour'] = filtered_df['time'].apply(lambda x: datetime.strptime(x, "%H:%M").hour)
+            time_counts = filtered_df['hour'].value_counts().sort_index().reset_index()
+            time_counts.columns = ['Hour', 'Count']
+            
+            fig_time = px.line(
+                time_counts, 
+                x='Hour', 
+                y='Count',
+                markers=True,
+                title="Incidents by Hour of Day",
+                template=PLOTLY_THEME
+            )
+            fig_time.update_layout(xaxis=dict(tickmode='array', tickvals=time_counts['Hour'].tolist()))
+            st.plotly_chart(fig_time, use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("### 🗓️ Trend Analysis")
+        # 5. Trend Over Time (Daily)
+        
+        # Convert 'date' to datetime object for proper grouping and plotting
+        filtered_df['date_dt'] = pd.to_datetime(filtered_df['date'])
+        daily_counts = filtered_df.groupby('date_dt').size().reset_index(name='Count')
+        
+        fig_trend = px.line(
+            daily_counts, 
+            x='date_dt', 
+            y='Count',
+            title="Incident Trend Over Time (Daily)",
+            template=PLOTLY_THEME
+        )
+        fig_trend.update_xaxes(title_text="Date")
+        st.plotly_chart(fig_trend, use_container_width=True)
+
+
+    with tab3:
+        st.markdown("### 🛠️ Strategies and Staff Analysis")
+        
+        # Helper to explode strategies column
+        def explode_strategies(df, col_name):
+            temp_df = df.copy()
+            # Handle potential NaN or empty strings gracefully before splitting
+            temp_df[col_name] = temp_df[col_name].fillna('').apply(lambda x: [s.strip() for s in x.split(', ') if s.strip()])
+            return temp_df.explode(col_name)
+
+        col5, col6 = st.columns(2)
+        
+        # 6. Preventative Strategies Used
+        with col5:
+            st.markdown("#### Preventative Strategies Usage")
+            prev_df = explode_strategies(filtered_df, 'preventative_strategies')
+            
+            # Filter out empty strings that might have resulted from cleanup
+            prev_counts = prev_df[prev_df['preventative_strategies'] != ''].groupby('preventative_strategies').size().reset_index(name='Count')
+            prev_counts.columns = ['Strategy', 'Count']
+            
+            if not prev_counts.empty:
+                fig_prev = px.bar(
+                    prev_counts, 
+                    x='Strategy', 
+                    y='Count', 
+                    color='Strategy',
+                    title="Preventative Strategy Frequency",
+                    template=PLOTLY_THEME
+                )
+                st.plotly_chart(fig_prev, use_container_width=True)
+            else:
+                st.info("No preventative strategies were recorded in the filtered data.")
+
+
+        # 7. Response Strategies Used
+        with col6:
+            st.markdown("#### Response Strategies Usage")
+            resp_df = explode_strategies(filtered_df, 'response_strategies')
+            
+            # Filter out empty strings
+            resp_counts = resp_df[resp_df['response_strategies'] != ''].groupby('response_strategies').size().reset_index(name='Count')
+            resp_counts.columns = ['Strategy', 'Count']
+            
+            if not resp_counts.empty:
+                fig_resp = px.bar(
+                    resp_counts, 
+                    x='Strategy', 
+                    y='Count', 
+                    color='Strategy',
+                    title="Response Strategy Frequency",
+                    template=PLOTLY_THEME
+                )
+                st.plotly_chart(fig_resp, use_container_width=True)
+            else:
+                st.info("No response strategies were recorded in the filtered data.")
+            
+        st.markdown("---")
+
+        # 8. Incidents by Reporting Staff
+        st.markdown("#### Incidents by Reporting Staff")
+        staff_counts = filtered_df['staff_name'].value_counts().reset_index()
+        staff_counts.columns = ['Staff Name', 'Count']
+        fig_staff = px.bar(
+            staff_counts, 
+            x='Staff Name', 
+            y='Count', 
+            color='Staff Name',
+            title="Incidents Logged by Staff Member",
+            template=PLOTLY_THEME
+        )
+        st.plotly_chart(fig_staff, use_container_width=True)
+
+
+    with tab4:
+        st.markdown("### 📑 Raw Incident Data")
+        
+        # Select and reorder columns for display
+        display_columns = [
+            'date', 'time', 'student_name', 'staff_name', 'category', 
+            'location', 'intensity', 'duration', 'antecedent', 
+            'description', 'function', 'preventative_strategies', 'response_strategies'
+        ]
+        
+        st.dataframe(filtered_df[display_columns].sort_values(by='date', ascending=False), use_container_width=True)
+
+    with tab5:
+        st.markdown("### 📥 Export Data")
+        
+        st.markdown("You can download the currently filtered dataset as a CSV file.")
+
+        # Exclude the temporary 'datetime' column before export if present
+        export_df = filtered_df.drop(columns=['datetime', 'staff_role', 'area', 'incident_id'], errors='ignore')
+        
+        csv_data = export_df.to_csv(index=False)
+        b64 = base64.b64encode(csv_data.encode()).decode()  # bytes to base64
+        
+        # Create a dynamic download button
+        href = f'<a href="data:file/csv;base64,{b64}" download="incident_data_export.csv">Download Filtered Data as CSV</a>'
+        st.markdown(href, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        st.markdown("To download the **entire** dataset (ignoring filters), use the button below.")
+        
+        full_export_df = df.drop(columns=['datetime', 'staff_role', 'area', 'incident_id'], errors='ignore')
+        full_csv_data = full_export_df.to_csv(index=False)
+        full_b64 = base64.b64encode(full_csv_data.encode()).decode()
+        full_href = f'<a href="data:file/csv;base64,{full_b64}" download="incident_data_full_export.csv">Download FULL Dataset as CSV</a>'
+        st.markdown(full_href, unsafe_allow_html=True)
+
+def render_admin_db():
+    """Renders a mock database management interface for admin role."""
+    
+    col_title, col_back = st.columns([4, 1])
+    with col_title:
+        st.title("Admin: Student and Staff Management (Mock DB)")
+    with col_back:
+        if st.button("⬅ Back to Portal", key="back_to_portal_from_admin"):
+            navigate_to('staff_area', role='ADM')
+    
+    st.markdown("---")
+    
+    tab_st, tab_sf = st.tabs(["Student Management", "Staff Management"])
+
+    with tab_st:
+        st.subheader("Current Students")
+        st.dataframe(pd.DataFrame(st.session_state.students), use_container_width=True, hide_index=True)
+        
+        st.markdown("#### Add New Student")
+        with st.form("add_student_form", clear_on_submit=True):
+            col_n, col_c = st.columns(2)
+            with col_n:
+                new_name = st.text_input("Student Name (Full)")
+            with col_c:
+                new_class = st.text_input("Class/Year Group (e.g., 1A, Yr 9)")
+            
+            new_area = st.selectbox("School Area", ['JP', 'PY', 'SY'])
+            
+            submitted_st = st.form_submit_button("Add Student")
+            
+            if submitted_st and new_name and new_class:
+                new_student = {
+                    # Generate a simple mock ID
+                    'id': 'st_' + new_area.lower() + '_' + str(len(st.session_state.students) + 1).zfill(2),
+                    'name': new_name,
+                    'class': new_class,
+                    'area': new_area
+                }
+                st.session_state.students.append(new_student)
+                st.success(f"Student {new_name} added successfully with ID: {new_student['id']}")
+                st.rerun()
+
+    with tab_sf:
+        st.subheader("Current Staff")
+        staff_df = pd.DataFrame(st.session_state.staff)
+        staff_df['special_role'] = staff_df['special'].apply(lambda x: 'Yes' if x else 'No')
+        st.dataframe(staff_df.drop(columns=['active', 'special']), use_container_width=True, hide_index=True)
+
+        st.markdown("#### Add New Staff Member (Non-Special Role)")
+        with st.form("add_staff_form", clear_on_submit=True):
+            col_sf_n, col_sf_r = st.columns(2)
+            with col_sf_n:
+                new_staff_name = st.text_input("Staff Name (e.g., John Smith)")
+            with col_sf_r:
+                new_staff_role = st.selectbox("Assigned Role/Area", ['JP', 'PY', 'SY', 'ADM'])
+            
+            submitted_sf = st.form_submit_button("Add Staff")
+            
+            if submitted_sf and new_staff_name:
+                new_staff = {
+                    # Generate a simple mock ID
+                    'id': 's' + str(len([s for s in st.session_state.staff if not s['special']]) + 1),
+                    'name': f"{new_staff_name} ({new_staff_role})",
+                    'role': new_staff_role,
+                    'active': True,
+                    'special': False
+                }
+                st.session_state.staff.append(new_staff)
+                st.success(f"Staff member {new_staff_name} added successfully.")
+                st.rerun()
+
+def render_landing_page():
+    """Renders the initial screen for role selection."""
+    
+    # --- IMAGE ADDITION FIX (Using a safe file path and a strong fallback) ---
+    col_img_1, col_img_2, col_img_3 = st.columns([1, 2, 1])
+    with col_img_2:
+        try:
+            # Note: The file name is "fba_icon.png". Ensure it is in the same directory.
+            st.image("fba_icon.png", caption="FBA Decision Icon", use_column_width=True)
+        except Exception:
+             # Provide a visual fallback if the image path fails
+            st.markdown(
+                '<div style="text-align: center; border: 2px solid #555; padding: 20px; border-radius: 10px; background-color: #1a1a1a; color: #ccc;">'
+                '<h2 style="margin: 0;">FBA Tool Icon</h2>'
+                '<p style="margin: 5px 0 0 0; font-size: small;">⚠️ Image (fba_icon.png) not found in the directory.</p>'
+                '</div>',
+                unsafe_allow_html=True
+            )
+    # --- END IMAGE ADDITION FIX ---
+    
+    st.title("📚 Behaviour Support & Data Analysis Tool")
+    st.markdown("---")
+    st.subheader("Please Select Your Role/Area to Continue:")
+    
+    col_jp, col_py, col_sy, col_adm, col_log = st.columns(5)
+    
+    with col_jp:
+        if st.button("Junior Primary (JP)", use_container_width=True, type="primary"):
+            navigate_to('staff_area', role='JP')
+    with col_py:
+        if st.button("Primary Years (PY)", use_container_width=True, type="primary"):
+            navigate_to('staff_area', role='PY')
+    with col_sy:
+        if st.button("Senior Years (SY)", use_container_width=True, type="primary"):
+            navigate_to('staff_area', role='SY')
+    with col_adm:
+        if st.button("Admin Portal (ADM)", use_container_width=True, type="secondary"):
+            navigate_to('staff_area', role='ADM')
+    
+    st.markdown("---")
+    st.subheader("Quick Log Incident (No Area Selection)")
+    
+    student_names = [s['name'] for s in st.session_state.students]
+    student_id_map = {s['name']: s['id'] for s in st.session_state.students}
+    
+    selected_student_name = st.selectbox("Select Student to Log Incident Directly:", options=[''] + student_names, index=0)
+    
+    if selected_student_name:
+        selected_student_id = student_id_map[selected_student_name]
+        if st.button(f"Start Quick Log for {selected_student_name}"):
+            st.session_state.temp_log_area = 'direct' 
+            navigate_to('direct_log_form', student_id=selected_student_id)
+
+def render_direct_log_form():
+    """Renders the incident log form directly after selection from the landing page."""
+    student = get_student_by_id(st.session_state.selected_student_id)
+    if student:
+        col_title, col_back = st.columns([4, 1])
+        with col_title:
+            st.markdown(f"## Quick Incident Log (Step 1)")
+        with col_back:
+            if st.button("⬅ Change Student", key="back_to_direct_select_form"):
+                navigate_to('landing')
+        st.markdown("---")
+        
+        render_incident_log_form(student)
+    else:
+        st.error("No student selected.")
+        navigate_to('landing')
+
+# --- Main App Execution ---
+
+def main():
+    """The main function to drive the Streamlit application logic."""
+    
+    # Navigation logic based on current_page state
+    if st.session_state.current_page == 'landing':
+        render_landing_page()
+    elif st.session_state.current_page == 'staff_area':
+        render_staff_area()
+    elif st.session_state.current_page == 'log_form':
+        render_log_form()
+    elif st.session_state.current_page == 'direct_log_form':
+        render_direct_log_form()
+    elif st.session_state.current_page == 'data_analysis':
+        render_data_analysis()
+    elif st.session_state.current_page == 'admin_db':
+        render_admin_db()
+    else:
+        st.error("Unknown navigation state. Returning to landing page.")
+        st.session_state.current_page = 'landing'
+        st.rerun()
+
+
+def generate_mock_incidents(num_incidents=15):
+    """Generates mock incident data for initial application testing."""
+    mock_data = []
+    
+    # Use the past 30 days for data
+    today = datetime.today().date()
+    dates = [today - timedelta(days=random.randint(0, 30)) for _ in range(num_incidents)]
+    
+    for i in range(num_incidents):
+        # Randomly select a student and staff
+        student = random.choice(MOCK_STUDENTS)
+        staff = random.choice([s for s in MOCK_STAFF if not s['special']]) # Only non-special staff for mock
+        
+        # Random incident details
+        category = random.choice(INCIDENT_CATEGORIES)
+        location = random.choice(LOCATIONS)
+        function = random.choice(FUNCTION_CATEGORIES)
+        
+        # Create a random time
+        t = time(random.randint(9, 14), random.randint(0, 59))
+        
+        # Combine date and time
+        dt = datetime.combine(dates[i], t)
+
+        # Strategies (simulating common selections)
+        prev_strats = random.sample(STRATEGIES_CATEGORIES['Preventative'], k=random.randint(0, 2))
+        resp_strats = random.sample(STRATEGIES_CATEGORIES['Response'], k=random.randint(0, 2))
+
+        mock_data.append({
+            'incident_id': 'mock_' + str(i+1),
+            'date': dates[i].strftime('%Y-%m-%d'),
+            'time': t.strftime('%H:%M'),
+            'datetime': dt,
+            'student_id': student['id'],
+            'student_name': student['name'],
+            'staff_id': staff['id'],
+            'staff_name': staff['name'],
+            'staff_role': staff['role'],
+            'area': student['area'],
+            'category': category,
+            'location': location,
+            'intensity': random.randint(1, 5),
+            'duration': random.randint(1, 15),
+            'antecedent': f"Mock Antecedent for {student['name']}",
+            'description': f"Mock incident description of {category} in the {location}.",
+            'function': function,
+            'preventative_strategies': ", ".join(prev_strats),
+            'response_strategies': ", ".join(resp_strats)
+        })
+    
+    return pd.DataFrame(mock_data)
+
+if __name__ == '__main__':
+    # Check if mock data is already loaded to prevent duplication on rerun
+    # This check now runs safely because st.session_state.incidents_df is guaranteed to exist.
+    if not any(st.session_state.incidents_df['incident_id'].astype(str).str.contains('mock')):
+        
+        mock_df = generate_mock_incidents()
+        
+        # Append mock data
+        st.session_state.incidents_df = pd.concat([st.session_state.incidents_df, mock_df], ignore_index=True)
+        
+        # Ensure 'datetime' is correctly parsed after concatenation
+        # This is a critical step for filtering and plotting later
+        st.session_state.incidents_df['datetime'] = pd.to_datetime(st.session_state.incidents_df['datetime'])
+
+    main()
